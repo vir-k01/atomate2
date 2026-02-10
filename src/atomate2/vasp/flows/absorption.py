@@ -6,9 +6,10 @@ from pathlib import Path
 from jobflow import Flow, Maker
 from pymatgen.core.structure import Structure
 
+from atomate2.vasp.flows.mp import MPMetaGGADoubleRelaxMaker
 from atomate2.vasp.jobs.absorption import IPAMaker, RPAMaker
 from atomate2.vasp.jobs.base import BaseVaspMaker
-from atomate2.vasp.jobs.mp import MP24StaticMaker, MPMetaGGARelaxMaker
+from atomate2.vasp.jobs.mp import MP24StaticMaker
 
 
 @dataclass
@@ -30,14 +31,14 @@ class MPAbsorptionMaker(Maker):
         Maker to generate the first relaxation.
     static_maker : .BaseVaspMaker
         Maker to generate a static calculation.
-    bs_maker : .BaseVaspMaker
-        Maker to generate the bandstructure calculation(s)
-    bandstructure_type : str #probs need to remove
-        The type of band structure to generate. Options are "line", "uniform" or "both".
+    ipa_maker : .BaseVaspMaker
+        Maker to generate the IPA calculation.
+    rpa_maker : .BaseVaspMaker
+        Maker to generate the RPA calculation.
     """
 
     name: str = "MP Absorption maker"
-    relax_maker: BaseVaspMaker | None = field(default_factory=MPMetaGGARelaxMaker)
+    relax_maker: BaseVaspMaker | None = field(default_factory=MPMetaGGADoubleRelaxMaker)
 
     static_maker: BaseVaspMaker = field(
         default_factory=lambda: MP24StaticMaker(
