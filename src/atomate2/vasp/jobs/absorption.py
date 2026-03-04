@@ -13,7 +13,7 @@ class IPAMaker(BaseVaspMaker):
 
     name: str = "IPA maker"
     input_set_generator: VaspInputGenerator = field(
-        default_factory=lambda: MPAbsorptionSet(mode="IPA")
+        default_factory=lambda: MPAbsorptionSet(mode="IPA", nbands_factor=1)
     )
     copy_vasp_kwargs: dict = field(
         default_factory=lambda: {"additional_vasp_files": ("WAVECAR", "CHGCAR")}
