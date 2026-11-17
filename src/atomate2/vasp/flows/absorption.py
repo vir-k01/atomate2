@@ -10,7 +10,6 @@ from atomate2.vasp.flows.mp import MPMetaGGADoubleRelaxMaker
 from atomate2.vasp.jobs.absorption import IPAMaker, RPAMaker
 from atomate2.vasp.jobs.base import BaseVaspMaker
 from atomate2.vasp.jobs.mp import MP24StaticMaker
-from atomate2.vasp.powerups import update_user_incar_settings
 
 
 @dataclass
@@ -39,7 +38,6 @@ class MPAbsorptionMaker(Maker):
     """
 
     name: str = "MP Absorption maker"
-    nbands_factor: float = field(default=2.0)
     relax_maker: BaseVaspMaker | None = field(default_factory=MPMetaGGADoubleRelaxMaker)
 
     static_maker: BaseVaspMaker = field(
@@ -75,10 +73,6 @@ class MPAbsorptionMaker(Maker):
             jobs += [relax_job]
 
         # Manually chain Static -> Optics (IPA) -> RPA to avoid Flow ownership issues
-        static_nbands = self.static_maker.input_set_generator.incar_settings["NBANDS"]
-        self.static_maker = update_user_incar_settings(
-            self.static_maker, {"NBANDS": static_nbands * self.nbands_factor}
-        )
         static_job = self.static_maker.make(structure, prev_dir=dir_name)
         jobs.append(static_job)
 
