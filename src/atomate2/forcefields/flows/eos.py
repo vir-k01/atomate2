@@ -9,8 +9,9 @@ from atomate2.common.flows.eos import CommonEosMaker
 from atomate2.forcefields.jobs import ForceFieldRelaxMaker
 
 if TYPE_CHECKING:
+    from typing import Self
+
     from jobflow import Maker
-    from typing_extensions import Self
 
     from atomate2.forcefields import MLFF
 
@@ -60,6 +61,7 @@ class ForceFieldEosMaker(CommonEosMaker):
     def from_force_field_name(
         cls,
         force_field_name: str | MLFF | dict,
+        calculator_kwargs: dict | None = None,
         relax_initial_structure: bool = True,
         **kwargs,
     ) -> Self:
@@ -70,6 +72,8 @@ class ForceFieldEosMaker(CommonEosMaker):
         ----------
         force_field_name : str or .MLFF or dict
             The name of the force field.
+        calculator_kwargs : dict | None
+            The keyword arguments to pass to the calculator
         relax_initial_structure: bool = True
             Whether to relax the initial structure before performing an EOS fit.
         **kwargs
@@ -80,17 +84,24 @@ class ForceFieldEosMaker(CommonEosMaker):
         -------
         ForceFieldEosMaker
         """
+        calculator_kwargs = calculator_kwargs or {}
         eos_relax_maker = ForceFieldRelaxMaker(
-            force_field_name=force_field_name, relax_cell=False
+            force_field_name=force_field_name,
+            calculator_kwargs=calculator_kwargs,
+            relax_cell=False,
         )
         kwargs.update(
             initial_relax_maker=(
-                ForceFieldRelaxMaker(force_field_name=force_field_name)
+                ForceFieldRelaxMaker(
+                    force_field_name=force_field_name,
+                    calculator_kwargs=calculator_kwargs,
+                )
                 if relax_initial_structure
                 else None
             ),
             eos_relax_maker=eos_relax_maker,
             static_maker=None,
+            **kwargs,
         )
         return cls(
             name=f"{eos_relax_maker.mlff.name} EOS Maker",

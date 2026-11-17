@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -10,9 +11,7 @@ from atomate2.common.flows.elastic import BaseElasticMaker
 from atomate2.forcefields.jobs import ForceFieldRelaxMaker
 
 if TYPE_CHECKING:
-    from typing import Any
-
-    from typing_extensions import Self
+    from typing import Any, Self
 
     from atomate2.forcefields import MLFF
 
@@ -20,6 +19,7 @@ if TYPE_CHECKING:
 _DEFAULT_RELAX_KWARGS: dict[str, Any] = {
     "force_field_name": "CHGNet",
     "relax_kwargs": {"fmax": 0.00001},
+    "fix_symmetry": True,
 }
 
 
@@ -104,7 +104,8 @@ class ElasticMaker(BaseElasticMaker):
     def from_force_field_name(
         cls,
         force_field_name: str | MLFF | dict,
-        mlff_kwargs: dict | None = None,
+        calculator_kwargs: dict | None = None,
+        relax_initial_structure: bool = True,
         **kwargs,
     ) -> Self:
         """
@@ -114,8 +115,11 @@ class ElasticMaker(BaseElasticMaker):
         ----------
         force_field_name : str or .MLFF or dict
             The name of the force field.
-        mlff_kwargs : dict or None (default)
-            kwargs to pass to `ForceFieldRelaxMaker`.
+        calculator_kwargs : dict or None (default)
+            calculator_kwargs to pass to `ForceFieldRelaxMaker`.
+        relax_initial_structure : bool = True (default)
+            Whether to relax the structure before computing
+            the elastic tensor.
         **kwargs
             Additional kwargs to pass to ElasticMaker.
 
@@ -123,23 +127,54 @@ class ElasticMaker(BaseElasticMaker):
         -------
         ElasticMaker
         """
+        warnings.warn(
+            "Fixed symmetry relaxations are automatically enabled "
+            "to improve elastic tensor stability. To disable this "
+            "specify ForceFieldRelaxMaker objects explicitly. ",
+            category=UserWarning,
+            stacklevel=2,
+        )
+
+        if (mlff_kwargs := kwargs.pop("mlff_kwargs", None)) is not None:
+            warnings.warn(
+                "`mlff_kwargs` has been marked for deprecation. "
+                "To specify `calculator_kwargs`, use that kwarg instead. "
+                "To obtain finer control over the makers used, specify them "
+                "directly in `ElasticMaker`.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+            if mlff_kwargs.get("calculator_kwargs"):
+                if calculator_kwargs:
+                    raise ValueError(
+                        "You have specified both `calculator_kwargs` and "
+                        "`mlff_kwargs`. `calculator_kwargs` is preferred, and "
+                        "`mlff_kwargs` may not be supported in the future."
+                    )
+                calculator_kwargs = mlff_kwargs.pop("calculator_kwargs", {})
+
         default_kwargs: dict[str, Any] = {
             **_DEFAULT_RELAX_KWARGS,
             **(mlff_kwargs or {}),
             "force_field_name": force_field_name,
+            "calculator_kwargs": calculator_kwargs or {},
         }
-        bulk_relax_maker = ForceFieldRelaxMaker(
-            relax_cell=True,
+
+        elastic_relax_maker = ForceFieldRelaxMaker(
+            relax_cell=False,
             **default_kwargs,
         )
-        kwargs.update(
-            bulk_relax_maker=bulk_relax_maker,
-            elastic_relax_maker=ForceFieldRelaxMaker(
-                relax_cell=False,
-                **default_kwargs,
-            ),
-        )
+
         return cls(
-            name=f"{bulk_relax_maker.mlff.name} elastic",
+            name=f"{elastic_relax_maker.mlff.name} elastic",
             **kwargs,
+            bulk_relax_maker=(
+                ForceFieldRelaxMaker(
+                    relax_cell=True,
+                    **default_kwargs,
+                )
+                if relax_initial_structure
+                else None
+            ),
+            elastic_relax_maker=elastic_relax_maker,
         )

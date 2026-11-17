@@ -3,15 +3,28 @@
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from jobflow import job
+import numpy as np
+from jobflow import Maker, job
+from pymatgen.io.ase import AseAtomsAdaptor
+from pymatgen.util.due import Doi, due
 
 from atomate2.ase.jobs import AseRelaxMaker
-from atomate2.forcefields.schemas import ForceFieldTaskDocument
-from atomate2.forcefields.utils import _FORCEFIELD_DATA_OBJECTS, MLFF, ForceFieldMixin
+from atomate2.forcefields.schemas import (
+    ForceFieldDielectricDocument,
+    ForceFieldTaskDocument,
+)
+from atomate2.forcefields.utils import (
+    _FORCEFIELD_DATA_OBJECTS,
+    MLFF,
+    ForceFieldMixin,
+    _get_pkg_version,
+    revert_default_dtype,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -77,6 +90,9 @@ class ForceFieldRelaxMaker(ForceFieldMixin, AseRelaxMaker):
         The name of the force field.
     relax_cell : bool = True
         Whether to allow the cell shape/volume to change during relaxation.
+    relax_shape : bool = False
+        Whether to allow the cell shape to relax at fixed volume.
+        Cannot be used together with `relax_cell=True`.
     fix_symmetry : bool = False
         Whether to fix the symmetry during relaxation.
         Refines the symmetry of the initial structure.
@@ -108,6 +124,7 @@ class ForceFieldRelaxMaker(ForceFieldMixin, AseRelaxMaker):
     name: str = "Force field relax"
     force_field_name: str | MLFF | dict = MLFF.Forcefield
     relax_cell: bool = True
+    relax_shape: bool = False
     fix_symmetry: bool = False
     symprec: float | None = 1e-2
     steps: int = 500
@@ -118,21 +135,29 @@ class ForceFieldRelaxMaker(ForceFieldMixin, AseRelaxMaker):
 
     @forcefield_job
     def make(
-        self, structure: Molecule | Structure, prev_dir: str | Path | None = None
-    ) -> ForceFieldTaskDocument | ForceFieldMoleculeTaskDocument:
+        self,
+        structure: Molecule | Structure | list[Molecule | Structure],
+        prev_dir: str | Path | None = None,
+    ) -> (
+        ForceFieldTaskDocument
+        | ForceFieldMoleculeTaskDocument
+        | list[ForceFieldTaskDocument | ForceFieldMoleculeTaskDocument]
+    ):
         """
         Perform a relaxation of a structure using a force field.
 
         Parameters
         ----------
-        structure: .Structure or Molecule
-            pymatgen structure or molecule.
+        structure: .Molecule or .Structure, or a list thereof
+            pymatgen molecule(s) or structure(s)
         prev_dir : str or Path or None
             A previous calculation directory to copy output files from. Unused, just
                 added to match the method signature of other makers.
-        """
-        ase_result = self._run_ase_safe(structure, prev_dir=prev_dir)
 
+        Returns
+        -------
+            ForceFieldTaskDocument, ForceFieldMoleculeTaskDocument, or a list thereof
+        """
         if len(self.task_document_kwargs) > 0:
             warnings.warn(
                 "`task_document_kwargs` is now deprecated, please use the top-level "
@@ -141,21 +166,33 @@ class ForceFieldRelaxMaker(ForceFieldMixin, AseRelaxMaker):
                 stacklevel=1,
             )
 
-        return ForceFieldTaskDocument.from_ase_compatible_result(
-            self.ase_calculator_name,
-            ase_result,
-            self.steps,
-            calculator_meta=self.calculator_meta,
-            relax_kwargs=self.relax_kwargs,
-            optimizer_kwargs=self.optimizer_kwargs,
-            relax_cell=self.relax_cell,
-            fix_symmetry=self.fix_symmetry,
-            symprec=self.symprec if self.fix_symmetry else None,
-            ionic_step_data=self.ionic_step_data,
-            store_trajectory=self.store_trajectory,
-            tags=self.tags,
-            **self.task_document_kwargs,
-        )
+        batch_mode = isinstance(structure, list)
+
+        ase_results = [
+            self._run_ase_safe(atoms, prev_dir=prev_dir)
+            for atoms in (structure if batch_mode else [structure])
+        ]
+
+        task_docs = [
+            ForceFieldTaskDocument.from_ase_compatible_result(
+                self.ase_calculator_name,
+                ase_result,
+                self.steps,
+                calculator_meta=self.calculator_meta,
+                relax_kwargs=self.relax_kwargs,
+                optimizer_kwargs=self.optimizer_kwargs,
+                relax_cell=self.relax_cell,
+                relax_shape=self.relax_shape,
+                fix_symmetry=self.fix_symmetry,
+                symprec=self.symprec if self.fix_symmetry else None,
+                ionic_step_data=self.ionic_step_data,
+                store_trajectory=self.store_trajectory,
+                tags=self.tags,
+                **self.task_document_kwargs,
+            )
+            for ase_result in ase_results
+        ]
+        return task_docs if batch_mode else task_docs[0]
 
 
 @dataclass
@@ -183,8 +220,86 @@ class ForceFieldStaticMaker(ForceFieldRelaxMaker):
     name: str = "Force field static"
     force_field_name: str | MLFF | dict = MLFF.Forcefield
     relax_cell: bool = False
+    relax_shape: bool = False
     steps: int = 1
     relax_kwargs: dict = field(default_factory=dict)
     optimizer_kwargs: dict = field(default_factory=dict)
     calculator_kwargs: dict = field(default_factory=dict)
     task_document_kwargs: dict = field(default_factory=dict)
+
+
+@due.dcite(
+    Doi("10.1103/b116-xy8k"),
+    description="MACE-Field: Born effective charges and dielectric tensor",
+)
+@due.dcite(
+    Doi("10.1038/sdata.2016.134"),
+    description="MACE-Field training data: Materials Project dielectric data",
+)
+@due.dcite(
+    Doi("10.1038/s41597-020-0407-9"),
+    description="MACE-Field training data: Materials Project ferroelectric data",
+)
+@dataclass
+class ForceFieldDielectricMaker(ForceFieldMixin, Maker):
+    """
+    Maker for the Born effective charges and the dielectric tensor from a force field.
+
+    The force field must give the Born effective charges and the electronic
+    susceptibility chi as the results "becs" and "polarizability", as MACE-Field
+    does. The high-frequency dielectric tensor is 1 + chi. Both are computed at
+    zero electric field by default.
+
+    MACE-Field needs the MACE-Field fork of mace-torch and a model file, see the
+    force field docs. This maker is new and less tested than the other force
+    field makers. It might still change in future versions.
+
+    Parameters
+    ----------
+    name : str
+        The job name.
+    force_field_name : str or .MLFF or dict
+        The name of the force field.
+    calculator_kwargs : dict
+        Keyword arguments that will get passed to the ASE calculator. For
+        MACE-Field, "model" must be set to the path of the model file.
+    """
+
+    name: str = "Force field dielectric"
+    force_field_name: str | MLFF | dict = MLFF.MACE_FIELD
+    calculator_kwargs: dict = field(default_factory=dict)
+
+    @job(output_schema=ForceFieldDielectricDocument)
+    def make(
+        self, structure: Structure, prev_dir: str | Path | None = None
+    ) -> ForceFieldDielectricDocument:
+        """
+        Compute the Born effective charges and the dielectric tensor.
+
+        Parameters
+        ----------
+        structure: .Structure
+            A pymatgen structure.
+        prev_dir : str or Path or None
+            A previous calculation directory. Unused, just added to match the
+            method signature of other makers.
+
+        Returns
+        -------
+        ForceFieldDielectricDocument
+        """
+        atoms = AseAtomsAdaptor.get_atoms(structure)
+        with revert_default_dtype():
+            atoms.calc = self._get_calculator()
+            atoms.get_potential_energy()
+        return ForceFieldDielectricDocument(
+            structure=structure,
+            # MACE-Field returns the Born charges flattened, one row of 9 per atom
+            born=atoms.calc.results["becs"].reshape(-1, 3, 3).tolist(),
+            epsilon_static=(
+                np.eye(3) + atoms.calc.results["polarizability"].reshape(3, 3)
+            ).tolist(),
+            forcefield_name=self.ase_calculator_name,
+            forcefield_version=_get_pkg_version(self.calculator_meta),
+            dir_name=os.getcwd(),
+        )
